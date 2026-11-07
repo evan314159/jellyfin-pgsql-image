@@ -28,11 +28,55 @@ jobs:
   build:
     runs-on: ubuntu-latest
     # A hung step otherwise runs to the six-hour default and bills all of it.
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # Jellyfin.Server is rebuilt from the commit in jellyfin-patch.env and its
+      # jellyfin.dll replaces the base image's (see "patch" below).
+      - id: patch-src
+        run: |
+          . ./jellyfin-patch.env
+          echo "repo=$JELLYFIN_PATCH_REPO" >> "$GITHUB_OUTPUT"
+          echo "ref=$JELLYFIN_PATCH_REF" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ steps.patch-src.outputs.repo }}
+          ref: ${{ steps.patch-src.outputs.ref }}
+          path: .jellyfin-src
+          persist-credentials: false
+
+      # The rebuilt dll must belong to the same Jellyfin release as the base image,
+      # or it runs against assemblies from another version.
+      - name: check patch version
+        run: |
+          jf=$(grep -oP '^FROM jellyfin/jellyfin:\K[^\s@]+' Dockerfile | head -1)
+          src=$(grep -oP 'AssemblyVersion\("\K[0-9.]+' .jellyfin-src/SharedVersion.cs)
+          echo "base image $jf, patch source $src"
+          case "$src" in
+            "$jf"|"$jf".*) ;;
+            *) echo "::error::jellyfin-patch.env builds Jellyfin $src but the base image is $jf"; exit 1 ;;
+          esac
+
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          global-json-file: .jellyfin-src/global.json
+
+      # jellyfin.dll is architecture-neutral IL, so this runs on the image's runtime as is.
+      # A fixed mtime keeps the layer identical across rebuilds of the same commit, so the
+      # unchanged-build check below still works.
+      - name: build Jellyfin.Server
+        run: |
+          dotnet publish .jellyfin-src/Jellyfin.Server/Jellyfin.Server.csproj \
+            -c Release --self-contained false -o .jellyfin-src/publish \
+            -p:DebugType=none -p:ContinuousIntegrationBuild=true
+          mkdir -p .jellyfin-patch
+          cp .jellyfin-src/publish/jellyfin.dll .jellyfin-patch/jellyfin.dll
+          touch -d '2000-01-01T00:00:00Z' .jellyfin-patch/jellyfin.dll
+          ls -l .jellyfin-patch
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
@@ -50,7 +94,7 @@ jobs:
           context: .
           platforms: linux/amd64
           load: true
-          tags: build
+          tags: base
           # Set here rather than in the Dockerfile, which is staged unchanged from
           # Jellyfin.Pgsql. The source label links the ghcr package to this repo.
           labels: |
@@ -63,6 +107,18 @@ jobs:
           # hits it.
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}/cache:buildcache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}/cache:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+
+      # Layer the rebuilt jellyfin.dll onto the image. The docker driver of the
+      # "default" builder sees the locally loaded base image; buildx's container
+      # builder would try to pull it.
+      - name: patch
+        env:
+          PATCH: ${{ steps.patch-src.outputs.repo }}@${{ steps.patch-src.outputs.ref }}
+        run: |
+          printf 'FROM base\nCOPY jellyfin.dll /jellyfin/jellyfin.dll\n' |
+            docker buildx build --builder default \
+              --label "io.github.evan314159.jellyfin-patch=$PATCH" \
+              -t build -f - .jellyfin-patch
 
       # Skip publishing when the build is identical to what :latest already
       # is (same layers and runtime config), so no-op rebuilds such as a manual

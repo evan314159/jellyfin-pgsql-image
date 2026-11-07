@@ -6,3 +6,6 @@
 LICENSE
 **/bin
 **/obj
+.jellyfin-src
+.jellyfin-patch
+jellyfin-patch.env
