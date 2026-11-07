@@ -1,0 +1,32 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "description": "Only the workflows are this repo's own. Everything else is staged from Jellyfin.Pgsql's docker/package.sh, so its Dockerfile and packages are updated there and re-staged, never here.",
+  "enabledManagers": [
+    "github-actions"
+  ],
+  "commitMessagePrefix": "chore:",
+  "prHourlyLimit": 0,
+  "rebaseWhen": "conflicted",
+  "packageRules": [
+    {
+      "description": "Tag bumps stay manual; pin/digest refreshes and action updates are safe to merge once the PR build passes.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "pin",
+        "pinDigest",
+        "digest"
+      ],
+      "automerge": true
+    }
+  ],
+  "platformAutomerge": false,
+  "timezone": "Australia/Perth"
+}

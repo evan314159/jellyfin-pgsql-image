@@ -1,0 +1,33 @@
+# Needs a token with delete:packages and read:packages scope -- GHCR_TOKEN is push-only.
+name: retention
+
+on:
+  schedule:
+    - cron: '0 5 * * 0'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Each build pushes a version tag, so this keeps the last five builds.
+      - uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
+        with:
+          package-name: ${{ github.event.repository.name }}
+          package-type: container
+          min-versions-to-keep: 5
+          token: ${{ secrets.GHCR_DELETE_TOKEN }}
+
+      # build.yaml's registry layer cache lives in <repo>/cache under one moving
+      # tag, so every push orphans the previous one. Only untagged versions go:
+      # the live buildcache tag is never touched.
+      - uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
+        with:
+          package-name: ${{ github.event.repository.name }}/cache
+          package-type: container
+          delete-only-untagged-versions: true
+          min-versions-to-keep: 5
+          token: ${{ secrets.GHCR_DELETE_TOKEN }}

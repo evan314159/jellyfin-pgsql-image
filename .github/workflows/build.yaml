@@ -1,0 +1,115 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    # Only inputs to the image count. Edits to CI or Renovate
+    # config don't change what gets built, so they must not mint a tag.
+    paths-ignore:
+      - '.github/**'
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.dockerignore'
+  pull_request:
+    paths-ignore:
+      - '.github/**'
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.dockerignore'
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # A hung step otherwise runs to the six-hour default and bills all of it.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      # GITHUB_TOKEN can't create a package in a private repo (permission_denied: write_package).
+      # Also needed on PRs: the layer cache lives in ghcr (see below).
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      # Load, don't push yet: publishing below depends on comparing this exact build.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: build
+          # Set here rather than in the Dockerfile, which is staged unchanged from
+          # Jellyfin.Pgsql. The source label links the ghcr package to this repo.
+          labels: |
+            org.opencontainers.image.title=Jellyfin with PostgreSQL
+            org.opencontainers.image.description=Jellyfin with the Jellyfin.Pgsql PostgreSQL database provider plugin
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          # Registry cache rather than the GHA cache: one written by a PR is
+          # invisible to main, so every merge rebuilt the changed layers from
+          # scratch. The PR build writes here too, so the post-merge main build
+          # hits it.
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}/cache:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}/cache:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+
+      # Skip publishing when the build is identical to what :latest already
+      # is (same layers and runtime config), so no-op rebuilds such as a manual
+      # dispatch don't mint a duplicate tag.
+      - id: changed
+        if: github.event_name != 'pull_request'
+        env:
+          REPO: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+        run: |
+          fp() {
+            docker inspect "$1" |
+              jq -c '.[0] | {layers: .RootFS.Layers, config: (.Config | del(.Image))}' |
+              sha256sum
+          }
+          if docker pull -q "$REPO:latest" >/dev/null 2>&1 &&
+             [ "$(fp build)" = "$(fp "$REPO:latest")" ]; then
+            echo "::notice::build is identical to $REPO:latest; skipping publish"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Tag as <Jellyfin major.minor>.<run number> (e.g. 12.4.17). The Jellyfin
+      # version comes from the base image the Dockerfile builds on, so the tag
+      # follows the Jellyfin that's inside; the run number gives every published
+      # plugin build its own tag.
+      - id: version
+        if: steps.changed.outputs.changed == 'true'
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          jf=$(grep -oP '^FROM jellyfin/jellyfin:\K[^\s@]+' Dockerfile | head -1)
+          case "$jf" in
+            [0-9]*.[0-9]*) ;;
+            *) echo "::error::unexpected Jellyfin base image tag: $jf"; exit 1 ;;
+          esac
+          v="$(echo "$jf" | cut -d. -f1-2).$RUN_NUMBER"
+          echo "Jellyfin $jf, tagging $v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: push
+        if: steps.changed.outputs.changed == 'true'
+        env:
+          REPO: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+          V: ${{ steps.version.outputs.version }}
+        run: |
+          docker tag build "$REPO:$V"
+          docker tag build "$REPO:latest"
+          docker push "$REPO:$V"
+          docker push "$REPO:latest"
