@@ -61,9 +61,11 @@ jobs:
             *) echo "::error::jellyfin-patch.env builds Jellyfin $src but the base image is $jf"; exit 1 ;;
           esac
 
+      # Jellyfin's global.json ("10.0.0" with rollForward) isn't a version setup-dotnet
+      # accepts, so take the channel the way Jellyfin's own CI does.
       - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
-          global-json-file: .jellyfin-src/global.json
+          dotnet-version: '10.0.x'
 
       # jellyfin.dll is architecture-neutral IL, so this runs on the image's runtime as is.
       # A fixed mtime keeps the layer identical across rebuilds of the same commit, so the
