@@ -68,13 +68,15 @@ jobs:
           dotnet-version: '10.0.x'
 
       # jellyfin.dll is architecture-neutral IL, so this runs on the image's runtime as is.
+      # Analyzers off: a newer SDK on the 10.0.x channel turns rules like CA1860 into errors
+      # in Jellyfin code we don't change, and they have no bearing on the dll.
       # A fixed mtime keeps the layer identical across rebuilds of the same commit, so the
       # unchanged-build check below still works.
       - name: build Jellyfin.Server
         run: |
           dotnet publish .jellyfin-src/Jellyfin.Server/Jellyfin.Server.csproj \
             -c Release --self-contained false -o .jellyfin-src/publish \
-            -p:DebugType=none -p:ContinuousIntegrationBuild=true
+            -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:RunAnalyzers=false
           mkdir -p .jellyfin-patch
           cp .jellyfin-src/publish/jellyfin.dll .jellyfin-patch/jellyfin.dll
           touch -d '2000-01-01T00:00:00Z' .jellyfin-patch/jellyfin.dll
