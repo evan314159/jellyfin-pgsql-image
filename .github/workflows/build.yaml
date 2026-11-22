@@ -34,8 +34,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      # Jellyfin.Server is rebuilt from the commit in jellyfin-patch.env and its
-      # jellyfin.dll replaces the base image's (see "patch" below).
+      # Jellyfin.Server is rebuilt from the commit in jellyfin-patch.env and the dlls
+      # it patches replace the base image's (see "patch" below).
       - id: patch-src
         run: |
           . ./jellyfin-patch.env
@@ -67,7 +67,7 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      # jellyfin.dll is architecture-neutral IL, so this runs on the image's runtime as is.
+      # The dlls are architecture-neutral IL, so they run on the image's runtime as is.
       # Analyzers off: a newer SDK on the 10.0.x channel turns rules like CA1860 into errors
       # in Jellyfin code we don't change, and they have no bearing on the dll.
       # A fixed mtime keeps the layer identical across rebuilds of the same commit, so the
@@ -78,8 +78,10 @@ jobs:
             -c Release --self-contained false -o .jellyfin-src/publish \
             -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:RunAnalyzers=false
           mkdir -p .jellyfin-patch
-          cp .jellyfin-src/publish/jellyfin.dll .jellyfin-patch/jellyfin.dll
-          touch -d '2000-01-01T00:00:00Z' .jellyfin-patch/jellyfin.dll
+          for dll in jellyfin.dll Jellyfin.Server.Implementations.dll; do
+            cp ".jellyfin-src/publish/$dll" ".jellyfin-patch/$dll"
+            touch -d '2000-01-01T00:00:00Z' ".jellyfin-patch/$dll"
+          done
           ls -l .jellyfin-patch
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
@@ -112,14 +114,14 @@ jobs:
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}/cache:buildcache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}/cache:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
 
-      # Layer the rebuilt jellyfin.dll onto the image. The docker driver of the
+      # Layer the rebuilt dlls onto the image. The docker driver of the
       # "default" builder sees the locally loaded base image; buildx's container
       # builder would try to pull it.
       - name: patch
         env:
           PATCH: ${{ steps.patch-src.outputs.repo }}@${{ steps.patch-src.outputs.ref }}
         run: |
-          printf 'FROM base\nCOPY jellyfin.dll /jellyfin/jellyfin.dll\n' |
+          printf 'FROM base\nCOPY jellyfin.dll Jellyfin.Server.Implementations.dll /jellyfin/\n' |
             docker buildx build --builder default \
               --label "io.github.evan314159.jellyfin-patch=$PATCH" \
               -t build -f - .jellyfin-patch
